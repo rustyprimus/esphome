@@ -1,0 +1,69 @@
+# substitutions:
+#   name: "air-office"
+#   friendly_name: "Office Air Quality Sensor"
+
+substitutions:
+  ota_password: !secret ota_password
+
+packages:
+  # Apollo's complete AIR-1 hardware configuration (sensors, LED, buttons, etc).
+  apollo_air1:
+    url: https://github.com/ApolloAutomation/AIR-1
+    ref: main
+    files:
+      - Integrations/ESPHome/AIR-1.yaml
+    refresh: 1d
+
+esphome:
+  friendly_name: ${friendly_name}
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+
+  # Keep the fallback access point in case normal Wi-Fi fails.
+# ap:
+#   ssid: "${friendly_name} Setup"
+#   password: !secret fallback_ap_password
+
+# This sensor is on mains power, not a sleeping battery device: pin the
+# package's "Prevent Sleep" switch permanently on so deep_sleep never engages
+# (the package only enters deep sleep via the native API's on_client_connected
+# handler when this switch is off).
+switch:
+  - id: !extend prevent_sleep
+    restore_mode: ALWAYS_ON
+
+captive_portal:
+
+mqtt:
+  id: mqtt_client
+  broker: !secret mqtt_broker
+  port: !secret mqtt_port
+  username: !secret mqtt_username
+  password: !secret mqtt_password
+
+  client_id: "${name}"
+  topic_prefix: "sensors/air_quality/${name}"
+
+  # You are not using Home Assistant MQTT discovery.
+  discovery: false
+  discover_ip: true
+
+  # Do not send ESPHome logs through MQTT.
+  log_topic: null
+
+  birth_message:
+    topic: "sensors/air_quality/${name}/status"
+    payload: "online"
+    qos: 1
+    retain: true
+
+  will_message:
+    topic: "sensors/air_quality/${name}/status"
+    payload: "offline"
+    qos: 1
+    retain: true
+
+  # Do not endlessly reboot if the Mosquitto broker is unavailable.
+  reboot_timeout: 0s

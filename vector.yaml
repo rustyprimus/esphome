@@ -1,0 +1,128 @@
+data_dir: /var/lib/vector
+
+sources:
+  mikrotik_syslog:
+    type: syslog
+    address: 0.0.0.0:514
+    mode: udp
+
+  soil_moisture_mqtt:
+    type: mqtt
+
+    # Mosquitto runs on the same Raspberry Pi.
+    host: 127.0.0.1
+    port: 1883
+
+    user: redmoonmqtt
+    password: "${MQTT_PASSWORD}"
+
+    client_id: vector-soil-moisture-collector
+    keep_alive: 60
+
+    # Vector accepts MQTT wildcard subscriptions here.
+    topic: "sensors/soil_moisture/#"
+
+    # Store the source topic in the event's `topic` field.
+    topic_key: topic
+
+    # Keep the complete MQTT payload as one event.
+    framing:
+      method: bytes
+
+    decoding:
+      codec: bytes
+
+transforms:
+  mikrotik_syslog_enrich:
+    type: remap
+    inputs:
+      - mikrotik_syslog
+    source: |
+      .collector = "redmoon"
+      .site = "home"
+      .vendor = "mikrotik"
+      .device_type = "router"
+
+      if exists(.host) {
+        .device = .host
+      }
+
+sinks:
+  syslog_local_json:
+    type: file
+    inputs:
+      - mikrotik_syslog_enrich
+
+    path: /var/log/vector/mikrotik-%Y-%m-%d.jsonl
+
+    encoding:
+      codec: json
+
+  syslog_s3_archive:
+    type: aws_s3
+    inputs:
+      - mikrotik_syslog_enrich                 # <- your source (or transform) name
+    bucket: aefron-home-telemetry          # <- your bucket name
+    region: us-east-1              # <- your bucket's region
+    key_prefix: "syslog/%Y/%m/%d/"   # date-partitioned object keys
+    compression: gzip
+    encoding:
+      codec: json                  # one JSON object per line; use "text" for raw message only
+    framing:
+      method: newline_delimited
+    batch:
+      max_bytes: 10000000          # ~10 MB objects
+      timeout_secs: 300            # or flush at least every 5 minutes
+    auth:
+      credentials_file: /etc/vector/aws.credentials
+      profile: default
+
+  soil_moisture_console:
+    type: console
+    inputs:
+      - soil_moisture_mqtt
+
+    encoding:
+      codec: json
+
+  soil_moisture_local:
+    type: file
+    inputs:
+      - soil_moisture_mqtt
+
+    path: /var/log/vector/soil_moisture/mqtt-%Y-%m-%d.jsonl
+    compression: none
+
+    encoding:
+      codec: json
+
+
+  soil_moisture_s3:
+    type: aws_s3
+    inputs:
+      - soil_moisture_mqtt
+
+    bucket: aefron-home-telemetry
+    region: us-east-1
+
+    key_prefix: "mqtt/soil_moisture/%Y/%m/%d/"   # date-partitioned object keys
+
+    compression: gzip
+
+    encoding:
+      codec: json
+
+    batch:
+      timeout_secs: 3600
+      max_bytes: 1048576
+
+    buffer:
+      type: disk
+      max_size: 268435488
+      when_full: block
+
+    auth:
+      credentials_file: /etc/vector/aws.credentials
+      profile: default
+
+ 

@@ -1,0 +1,219 @@
+data_dir: /var/lib/vector
+
+secret:
+  mqtt_secrets:
+    type: file
+    path: /etc/vector/mqtt.secrets   # JSON object: {"user": "...", "password": "..."}
+
+  s3_config:
+    type: file
+    # JSON object: {"region": "...", "telemetry_bucket": "..."}
+    path: /etc/vector/s3.secrets
+
+sources:
+
+  air_quality_mqtt:
+    type: mqtt
+
+    # Mosquitto runs on the same Raspberry Pi.
+    host: 127.0.0.1
+    port: 1883
+
+    # Resolved at load/SIGHUP-reload time from the `mqtt_secrets` file
+    # backend defined above (reads /etc/vector/mqtt.secrets).
+    user: "SECRET[mqtt_secrets.user]"
+    password: "SECRET[mqtt_secrets.password]"
+
+    client_id: vector-air-quality-collector
+    keep_alive: 60
+
+    # Vector accepts MQTT wildcard subscriptions here.
+    topic: "sensors/air_quality/#"
+
+    # Store the source topic in the event's `topic` field.
+    topic_key: topic
+
+    # Keep the complete MQTT payload as one event.
+    framing:
+      method: bytes
+
+    decoding:
+      codec: bytes
+
+  journald:
+    type: journald
+
+    # Only forward entries from the current boot; set to false to also
+    # replay entries from previous boots on first start.
+    current_boot_only: true
+
+    # First run: replay the existing journal backlog once, then Vector
+    # checkpoints its read position (cursor) under data_dir and only
+    # tails new entries from there on every subsequent restart.
+    since_now: false
+
+    # Avoid a feedback loop of vector logging about its own journald reads.
+    exclude_units:
+      - vector.service
+
+  vector_internal_logs:
+    type: internal_logs
+    # Emits Vector's own log lines (source/sink errors, retries, config
+    # reloads, etc.) as events. No backlog/replay concept — this only
+    # captures what Vector logs while it is running.
+
+transforms:
+  air_quality_enrich:
+    type: remap
+    inputs:
+      - air_quality_mqtt
+    source: |
+      .timestamp = now()
+
+  journald_enrich:
+    type: remap
+    inputs:
+      - journald
+    source: |
+      .collector = "edeloffice"
+      .site = "office"
+      .device_type = "raspberry_pi"
+
+      # `remap_priority` on the journald source is deprecated; do the
+      # numeric PRIORITY (0-7) -> syslog level keyword conversion here.
+      .severity = to_syslog_level(to_int(.PRIORITY) ?? -1) ?? .PRIORITY
+
+sinks:
+  air_quality_local:
+    type: file
+    inputs:
+      - air_quality_enrich
+
+    path: /var/log/vector/air_quality/mqtt-%Y-%m-%d.jsonl
+    compression: none
+
+    encoding:
+      codec: json
+
+
+  air_quality_s3:
+    type: aws_s3
+    inputs:
+      - air_quality_enrich
+
+    bucket: "SECRET[s3_config.telemetry_bucket]"
+    region: "SECRET[s3_config.region]"
+
+    key_prefix: "mqtt/air_quality/%Y/%m/%d/"   # date-partitioned object keys
+
+    compression: gzip
+
+    encoding:
+      codec: json
+
+    batch:
+      timeout_secs: 60
+      max_bytes: 1048576
+
+    buffer:
+      type: disk
+      max_size: 268435488
+      when_full: block
+
+    auth:
+      credentials_file: /etc/vector/aws.credentials
+      profile: default
+
+  vector_internal_logs_console:
+    type: console
+    inputs:
+      - vector_internal_logs
+
+    encoding:
+      codec: json
+
+  vector_internal_logs_local:
+    type: file
+    inputs:
+      - vector_internal_logs
+
+    path: /var/log/vector/internal/vector-%Y-%m-%d.jsonl
+    compression: none
+
+    encoding:
+      codec: json
+
+  vector_internal_logs_s3:
+    type: aws_s3
+    inputs:
+      - vector_internal_logs
+
+    bucket: "SECRET[s3_config.telemetry_bucket]"
+    region: "SECRET[s3_config.region]"
+
+    key_prefix: "vector_internal/%Y/%m/%d/"   # date-partitioned object keys
+
+    compression: gzip
+
+    encoding:
+      codec: json
+
+    framing:
+      method: newline_delimited
+
+    batch:
+      timeout_secs: 10     # flush at least every 10 seconds
+      max_bytes: 10000000   # ~10 MB objects
+
+    buffer:
+      type: disk
+      max_size: 268435488   # smaller buffer: internal logs are low-volume
+      when_full: block
+
+    auth:
+      credentials_file: /etc/vector/aws.credentials
+      profile: default
+
+  journald_local:
+    type: file
+    inputs:
+      - journald_enrich
+
+    path: /var/log/vector/journald/journald-%Y-%m-%d.jsonl
+    compression: none
+
+    encoding:
+      codec: json
+
+  journald_s3:
+    type: aws_s3
+    inputs:
+      - journald_enrich
+
+    bucket: "SECRET[s3_config.telemetry_bucket]"
+    region: "SECRET[s3_config.region]"
+
+    key_prefix: "journald/%Y/%m/%d/"   # date-partitioned object keys
+
+    compression: gzip
+
+    encoding:
+      codec: json
+
+    framing:
+      method: newline_delimited
+
+    batch:
+      timeout_secs: 10     # flush at least every 10 seconds
+      max_bytes: 10000000   # ~10 MB objects
+
+    buffer:
+      type: disk
+      max_size: 268435488
+      when_full: block
+
+    auth:
+      credentials_file: /etc/vector/aws.credentials
+      profile: default
+
+ 
